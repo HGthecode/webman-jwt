@@ -273,17 +273,34 @@ class JwtToken
         $publicKey = self::ACCESS_TOKEN == $tokenType ? self::getPublicKey($config['algorithms']) : self::getPublicKey($config['algorithms'], self::REFRESH_TOKEN);
         JWT::$leeway = $config['leeway'];
 
-        $decoded = JWT::decode($token, new Key($publicKey, $config['algorithms']));
-        $decodeToken = json_decode(json_encode($decoded), true);
-        if ($config['is_single_device']) {
-            $cacheTokenPre = $config['cache_token_pre'];
-            if ($tokenType == self::REFRESH_TOKEN) {
-                $cacheTokenPre = $config['cache_refresh_token_pre'];
+        // 设置验证选项
+        $options = [
+            'verify_aud' => true, // 验证接收者
+            'verify_iss' => true  // 验证签发者
+        ];
+
+        try {
+            $decoded = JWT::decode($token, new Key($publicKey, $config['algorithms']));
+            
+            // 手动验证接收者
+            if (!empty($config['aud']) && (!isset($decoded->aud) || $decoded->aud !== $config['aud'])) {
+                throw new JwtTokenException('令牌接收者验证失败', 401016);
             }
-            $client = $decodeToken['extend']['client'] ?? self::TOKEN_CLIENT_WEB;
-            RedisHandler::verifyToken($cacheTokenPre, $client, (string)$decodeToken['extend']['id'], $token);
+            
+            $decodeToken = json_decode(json_encode($decoded), true);
+            
+            if ($config['is_single_device']) {
+                $cacheTokenPre = $config['cache_token_pre'];
+                if ($tokenType == self::REFRESH_TOKEN) {
+                    $cacheTokenPre = $config['cache_refresh_token_pre'];
+                }
+                $client = $decodeToken['extend']['client'] ?? self::TOKEN_CLIENT_WEB;
+                RedisHandler::verifyToken($cacheTokenPre, $client, (string)$decodeToken['extend']['id'], $token);
+            }
+            return $decodeToken;
+        } catch (UnexpectedValueException $e) {
+            throw new JwtTokenException('令牌验证失败: ' . $e->getMessage(), 401017);
         }
-        return $decodeToken;
     }
 
     /**
@@ -310,7 +327,7 @@ class JwtToken
     {
         $basePayload = [
             'iss' => $config['iss'], // 签发者
-            'aud' => $config['iss'], // 接收该JWT的一方
+            'aud' => $config['aud'] ?: $config['iss'], // 接收者,为空则默认等于签发者
             'iat' => time(), // 签发时间
             'nbf' => time() + ($config['nbf'] ?? 0), // 某个时间点后才能访问
             'exp' => time() + $config['access_exp'], // 过期时间
